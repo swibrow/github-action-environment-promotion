@@ -67,26 +67,24 @@ jobs:
           STACKS=($(echo '${{ needs.load-config.outputs.stacks }}' | tr ',' ' '))
 
           echo "Creating filter configuration..."
-          FILTER='{"filters": {'
 
-          for STACK in "${STACKS[@]}"; do
-            # Use STACK_PATH instead of PATH as the variable name
-            STACK_PATH=$(echo "$STACK_PATHS" | jq -r ".[\"$STACK\"].path")
-            echo "Stack: $STACK, Path: $STACK_PATH"
-            FILTER="$FILTER\"$STACK\": [\"$STACK_PATH\"],"
-          done
-
-          # Remove trailing comma and close JSON
-          FILTER="${FILTER%,}}}"
-
-          # Create directory if it doesn't exist
+          # Create YAML file with stack names as keys directly
           mkdir -p .github
-          echo "$FILTER" > .github/filter.json
-          echo "Generated filter configuration:"
-          cat .github/filter.json
+
+          {
+            for STACK in "${STACKS[@]}"; do
+              # Extract path using jq, being careful with variable names
+              STACK_PATH=$(echo "$STACK_PATHS" | jq -r ".[\"$STACK\"].path")
+              echo "$STACK:"
+              echo "  - '$STACK_PATH'"
+            done
+          } > .github/filter.yml
+
+          echo "Created filter configuration:"
+          cat .github/filter.yml
 
       - name: Filter for Terraform stack changes
-        uses: dorny/paths-filter@v2
+        uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: .github/filter.json
