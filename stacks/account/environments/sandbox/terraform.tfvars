@@ -1,1 +1,1 @@
-var2 = "zzxxsdfsasdfxzz"
+var2 = "z"
