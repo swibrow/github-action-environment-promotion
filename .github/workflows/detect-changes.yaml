@@ -146,7 +146,8 @@ jobs:
               f.write(f"selected_environments={json.dumps(selected_envs)}\n")
               f.write(f"auto_promote={auto_promote}\n")
               f.write(f"required_approvals={required_approvals}\n")
-        '
+          '
+
   create-tags-and-issues:
     needs: [detect-changes, parse-pr-environments, load-config]
     if: ${{ needs.detect-changes.outputs.has_changes == 'true' && fromJSON(needs.parse-pr-environments.outputs.selected_environments)[0] != null }}
