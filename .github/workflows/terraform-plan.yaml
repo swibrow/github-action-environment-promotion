@@ -16,6 +16,7 @@ jobs:
       environment: ${{ steps.check.outputs.environment }}
       tag: ${{ steps.check.outputs.tag }}
       issue: ${{ steps.check.outputs.issue }}
+      base_path: ${{ steps.check.outputs.base_path }}
     steps:
       - uses: actions/checkout@v3
 
@@ -28,11 +29,13 @@ jobs:
             ENV=$(jq -r '.environment' deployment.json)
             TAG=$(jq -r '.tag' deployment.json)
             ISSUE=$(jq -r '.issue' deployment.json)
+            BASE_PATH=$(jq -r '.base_path // "stacks"' deployment.json)
 
             echo "stack=$STACK" >> $GITHUB_OUTPUT
             echo "environment=$ENV" >> $GITHUB_OUTPUT
             echo "tag=$TAG" >> $GITHUB_OUTPUT
             echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+            echo "base_path=$BASE_PATH" >> $GITHUB_OUTPUT
           else
             echo "is_deployment=false" >> $GITHUB_OUTPUT
           fi
@@ -49,13 +52,13 @@ jobs:
 
       - name: Terraform Init
         run: |
-          cd stacks/${{ needs.check-deployment-pr.outputs.stack }}
+          cd ${{ needs.check-deployment-pr.outputs.base_path }}/${{ needs.check-deployment-pr.outputs.stack }}
           terraform init -backend-config=environments/${{ needs.check-deployment-pr.outputs.environment }}/backend.tfvars
 
       - name: Terraform Plan
         id: plan
         run: |
-          cd stacks/${{ needs.check-deployment-pr.outputs.stack }}
+          cd ${{ needs.check-deployment-pr.outputs.base_path }}/${{ needs.check-deployment-pr.outputs.stack }}
           terraform plan -var-file=environments/${{ needs.check-deployment-pr.outputs.environment }}/terraform.tfvars -out=tfplan
           terraform show -no-color tfplan > plan_output.txt
           echo "PLAN_OUTPUT<<EOF" >> $GITHUB_ENV

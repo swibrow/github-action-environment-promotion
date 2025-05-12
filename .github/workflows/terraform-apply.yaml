@@ -20,6 +20,7 @@ jobs:
       issue: ${{ steps.check.outputs.issue }}
       auto_promote: ${{ steps.check.outputs.auto_promote }}
       selected_environments: ${{ steps.check.outputs.selected_environments }}
+      base_path: ${{ steps.check.outputs.base_path }}
       next_environment: ${{ steps.next.outputs.next_environment }}
     steps:
       - uses: actions/checkout@v3
@@ -37,6 +38,7 @@ jobs:
             ISSUE=$(jq -r '.issue' deployment.json)
             AUTO_PROMOTE=$(jq -r '.auto_promote' deployment.json)
             SELECTED_ENVS=$(jq '.selected_environments' deployment.json)
+            BASE_PATH=$(jq -r '.base_path // "stacks"' deployment.json)
 
             echo "stack=$STACK" >> $GITHUB_OUTPUT
             echo "environment=$ENV" >> $GITHUB_OUTPUT
@@ -44,6 +46,7 @@ jobs:
             echo "issue=$ISSUE" >> $GITHUB_OUTPUT
             echo "auto_promote=$AUTO_PROMOTE" >> $GITHUB_OUTPUT
             echo "selected_environments=$SELECTED_ENVS" >> $GITHUB_OUTPUT
+            echo "base_path=$BASE_PATH" >> $GITHUB_OUTPUT
           else
             echo "is_deployment=false" >> $GITHUB_OUTPUT
           fi
@@ -86,7 +89,7 @@ jobs:
       - name: Terraform Init and Apply
         id: apply
         run: |
-          cd stacks/${{ needs.check-deployment-pr.outputs.stack }}
+          cd ${{ needs.check-deployment-pr.outputs.base_path }}/${{ needs.check-deployment-pr.outputs.stack }}
           terraform init -backend-config=environments/${{ needs.check-deployment-pr.outputs.environment }}/backend.tfvars
           terraform apply -var-file=environments/${{ needs.check-deployment-pr.outputs.environment }}/terraform.tfvars -auto-approve
 
@@ -161,6 +164,7 @@ jobs:
             const selectedEnvs = ${{ needs.check-deployment-pr.outputs.selected_environments }};
             const autoPromote = ${{ needs.check-deployment-pr.outputs.auto_promote }};
             const requiredApprovals = '${{ needs.check-deployment-pr.outputs.required_approvals }}';
+            const basePath = '${{ needs.check-deployment-pr.outputs.base_path }}';
             const branchName = `deploy/${tag}/${nextEnv}`;
 
             // Create branch
@@ -177,7 +181,8 @@ jobs:
               issue: issueNumber,
               auto_promote: autoPromote,
               required_approvals: requiredApprovals,
-              selected_environments: selectedEnvs
+              selected_environments: selectedEnvs,
+              base_path: basePath
             };
 
             fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
@@ -218,4 +223,21 @@ jobs:
               2. Approve and merge this PR to deploy to ${nextEnv.toUpperCase()}
               ${autoPromote && selectedEnvs.indexOf(nextEnv) < selectedEnvs.length - 1 ? '3. The next environment PR will be created automatically upon successful deployment' : '3. This is the final environment in the deployment sequence'}
 
-              This is part of a deployment tracked in issue
+              This is part of a deployment tracked in issue #${issueNumber}.
+              `,
+              head: branchName,
+              base: 'main'
+            });
+
+            console.log(`Created PR #${pr.number} for ${stack} to ${nextEnv}`);
+
+            // Update tracking issue with PR link
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: `## ${nextEnv.toUpperCase()} Deployment PR Created
+
+              PR #${pr.number} has been created to deploy stack \`${stack}\` to the ${nextEnv.toUpperCase()} environment.
+              `
+            });

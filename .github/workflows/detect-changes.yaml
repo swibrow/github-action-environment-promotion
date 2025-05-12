@@ -1,4 +1,3 @@
-# .github/workflows/terraform-detect-changes.yml
 name: Terraform - Detect Changes and Create Tags
 
 on:
@@ -7,8 +6,6 @@ on:
       - closed
     branches:
       - main
-    paths:
-      - 'stacks/**'
 
 jobs:
   check-merged:
@@ -20,41 +17,85 @@ jobs:
       - id: check
         run: echo "merged=true" >> $GITHUB_OUTPUT
 
-  detect-changes:
+  load-config:
     needs: check-merged
     runs-on: ubuntu-latest
     outputs:
-      changed_stacks: ${{ steps.filter.outputs.changes }}
-      has_changes: ${{ steps.check.outputs.has_changes }}
+      stacks: ${{ steps.config.outputs.stacks }}
+      stack_paths: ${{ steps.config.outputs.stack_paths }}
+      environments: ${{ steps.config.outputs.environments }}
+      base_path: ${{ steps.config.outputs.base_path }}
     steps:
       - uses: actions/checkout@v3
+
+      - id: config
+        name: Load repository configuration
+        run: |
+          if [ -f ".github/config.json" ]; then
+            STACKS=$(jq -r '.stacks | keys | join(",")' .github/config.json)
+            STACK_PATHS=$(jq -c '.stacks' .github/config.json)
+            ENVIRONMENTS=$(jq -r '.environments | join(",")' .github/config.json)
+            BASE_PATH=$(jq -r '.basePath // "stacks"' .github/config.json)
+
+            echo "stacks=$STACKS" >> $GITHUB_OUTPUT
+            echo "stack_paths=$STACK_PATHS" >> $GITHUB_OUTPUT
+            echo "environments=$ENVIRONMENTS" >> $GITHUB_OUTPUT
+            echo "base_path=$BASE_PATH" >> $GITHUB_OUTPUT
+          else
+            echo "Error: .github/config.json not found"
+            exit 1
+          fi
+
+  detect-changes:
+    needs: [check-merged, load-config]
+    runs-on: ubuntu-latest
+    outputs:
+      changed_stacks: ${{ steps.detect.outputs.changed_stacks }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Create dynamic path filter
+        id: create_filter
+        run: |
+          STACK_PATHS='${{ needs.load-config.outputs.stack_paths }}'
+          STACKS=($(echo '${{ needs.load-config.outputs.stacks }}' | tr ',' ' '))
+
+          echo "Creating filter configuration..."
+          FILTER="{\"filters\": {"
+
+          for STACK in "${STACKS[@]}"; do
+            PATH=$(echo $STACK_PATHS | jq -r ".[\"$STACK\"].path")
+            FILTER="$FILTER\"$STACK\": [\"$PATH\"],"
+          done
+
+          # Remove trailing comma and close JSON
+          FILTER="${FILTER%,}}"
+
+          echo "$FILTER" > filter.json
+          cat filter.json
 
       - name: Filter for Terraform stack changes
         uses: dorny/paths-filter@v2
         id: filter
         with:
-          filters: |
-            account:
-              - 'stacks/account/**'
-            network:
-              - 'stacks/network/**'
-            platform:
-              - 'stacks/platform/**'
-            shared:
-              - 'stacks/shared/**'
+          filters-file: filter.json
 
-      - name: Check if stacks changed
-        id: check
+      - id: detect
+        name: Detect changed stacks
         run: |
-          CHANGES='${{ steps.filter.outputs.changes }}'
+          CHANGES=$(echo '${{ toJSON(steps.filter.outputs.changes) }}')
+
           if [ "$CHANGES" != "[]" ]; then
             echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "changed_stacks=$CHANGES" >> $GITHUB_OUTPUT
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "changed_stacks=[]" >> $GITHUB_OUTPUT
           fi
 
   parse-pr-environments:
-    needs: [check-merged, detect-changes]
+    needs: [check-merged, detect-changes, load-config]
     if: needs.detect-changes.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
     outputs:
@@ -66,38 +107,38 @@ jobs:
         name: Parse PR body for environment selection
         run: |
           PR_BODY="${{ github.event.pull_request.body }}"
+          ENVIRONMENTS=($(echo '${{ needs.load-config.outputs.environments }}' | tr ',' ' '))
 
-          # Parse selected environments using regex
-          SANDBOX_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] sandbox" | wc -l)
-          DEV_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] dev" | wc -l)
-          PROD_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] prod" | wc -l)
-
+          # Initialize empty array
           SELECTED_ENVS="["
-          if [ $SANDBOX_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"sandbox\","; fi
-          if [ $DEV_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"dev\","; fi
-          if [ $PROD_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"prod\","; fi
+
+          # Check each environment
+          for ENV in "${ENVIRONMENTS[@]}"; do
+            # Use shell pattern matching instead of grep
+            if [[ "$PR_BODY" == *"- [x] $ENV"* ]]; then
+              SELECTED_ENVS="$SELECTED_ENVS\"$ENV\","
+            fi
+          done
+
+          # Remove trailing comma and close array
           SELECTED_ENVS="${SELECTED_ENVS%,}]"
 
-          # Extract auto-promote setting
-          AUTO_PROMOTE=$(echo "$PR_BODY" | grep -o "Auto-promote: yes" | wc -l)
-          if [ $AUTO_PROMOTE -gt 0 ]; then
+          # Simplified auto-promote detection
+          if [[ "$PR_BODY" == *"Auto-promote: yes"* ]]; then
             AUTO_PROMOTE="true"
           else
             AUTO_PROMOTE="false"
           fi
 
-          # Extract required approvals
-          APPROVALS=$(echo "$PR_BODY" | grep -o "Required approvals: [0-9]+" | grep -o "[0-9]\+")
-          if [ -z "$APPROVALS" ]; then
-            APPROVALS="1"
-          fi
+          # Extract required approvals with pattern matching
+          APPROVALS=$(echo "$PR_BODY" | grep -E "Required approvals: *[0-9]+" | grep -E -o "[0-9]+" || echo "1")
 
           echo "selected_environments=$SELECTED_ENVS" >> $GITHUB_OUTPUT
           echo "auto_promote=$AUTO_PROMOTE" >> $GITHUB_OUTPUT
           echo "required_approvals=$APPROVALS" >> $GITHUB_OUTPUT
 
   create-tags-and-issues:
-    needs: [detect-changes, parse-pr-environments]
+    needs: [detect-changes, parse-pr-environments, load-config]
     if: ${{ needs.detect-changes.outputs.has_changes == 'true' && fromJSON(needs.parse-pr-environments.outputs.selected_environments)[0] != null }}
     runs-on: ubuntu-latest
     steps:
@@ -120,6 +161,7 @@ jobs:
             const selectedEnvs = ${{ needs.parse-pr-environments.outputs.selected_environments }};
             const autoPromote = ${{ needs.parse-pr-environments.outputs.auto_promote }};
             const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
+            const basePath = '${{ needs.load-config.outputs.base_path }}';
 
             // Process each changed stack
             for (const stack of changedStacks) {
@@ -175,14 +217,14 @@ jobs:
 
                 // Create PR for first environment in the selection
                 const firstEnv = selectedEnvs[0];
-                await createEnvironmentPR(stack, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs);
+                await createEnvironmentPR(stack, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs, basePath);
               } catch (error) {
                 console.error(`Error processing stack ${stack}: ${error}`);
               }
             }
 
             // Helper function to create environment PR
-            async function createEnvironmentPR(stack, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs) {
+            async function createEnvironmentPR(stack, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs, basePath) {
               const branchName = `deploy/${tag}/${env}`;
 
               // Create branch
@@ -197,7 +239,8 @@ jobs:
                 issue: issueNumber,
                 auto_promote: autoPromote,
                 required_approvals: requiredApprovals,
-                selected_environments: selectedEnvs
+                selected_environments: selectedEnvs,
+                base_path: basePath
               };
 
               fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
