@@ -166,7 +166,7 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}  # Use token with write permissions
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Get current date
         id: date
@@ -175,25 +175,87 @@ jobs:
 
       - name: Debug changed stacks
         run: |
-          echo "Changed stacks: ${{ needs.detect-changes.outputs.changed_stacks }}"
-          echo "Type: $(echo '${{ needs.detect-changes.outputs.changed_stacks }}' | jq -r 'type')"
+          echo "Changed stacks raw: ${{ needs.detect-changes.outputs.changed_stacks }}"
+
+      - name: Extract changed stacks
+        id: extract_stacks
+        run: |
+          # Ensure we're dealing with valid JSON and extracting the stack names correctly
+          CHANGED_STACKS='${{ needs.detect-changes.outputs.changed_stacks }}'
+
+          # If the output is empty or invalid, use an empty array
+          if [[ "$CHANGED_STACKS" == "" || "$CHANGED_STACKS" == "[]" ]]; then
+            echo "No changes detected, using empty array"
+            echo "stacks_array=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Use Python to safely parse and extract stack names
+          python3 -c "
+          import json
+          import os
+
+          try:
+              # Parse the JSON string
+              changed_stacks_json = '''$CHANGED_STACKS'''
+              changed_stacks = json.loads(changed_stacks_json)
+
+              # Extract and validate stack names
+              if isinstance(changed_stacks, list):
+                  # It's already a list, use it directly
+                  stacks = changed_stacks
+              elif isinstance(changed_stacks, dict):
+                  # Extract keys from dictionary
+                  stacks = list(changed_stacks.keys())
+              else:
+                  # Not a list or dict, convert to string and make a single-item list
+                  stacks = [str(changed_stacks)]
+
+              # Check for invalid characters
+              valid_stacks = []
+              for stack in stacks:
+                  if stack and all(c.isalnum() or c in '-_' for c in stack):
+                      valid_stacks.append(stack)
+                  else:
+                      print(f'Warning: Skipping invalid stack name: {stack}')
+
+              # Output as JSON array
+              print(f'Extracted stack names: {valid_stacks}')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f'stacks_array={json.dumps(valid_stacks)}\n')
+
+          except Exception as e:
+              print(f'Error processing stack names: {e}')
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write('stacks_array=[]\n')
+          " || echo "stacks_array=[]" >> $GITHUB_OUTPUT
+
+          # Display the extracted stacks
+          echo "Extracted stacks: $(cat $GITHUB_OUTPUT | grep stacks_array | cut -d= -f2-)"
 
       - name: Create tags and tracking issues
         id: create_tags
         uses: actions/github-script@v6
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}  # Use token with write permissions
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const date = '${{ steps.date.outputs.date }}';
 
-            // Parse the JSON string to get an array of stacks
-            let changedStacks;
+            // Use the properly extracted stacks array
+            const stacksArrayStr = '${{ steps.extract_stacks.outputs.stacks_array }}';
+            console.log(`Stacks array string: ${stacksArrayStr}`);
+
+            let stacksArray;
             try {
-              changedStacks = JSON.parse('${{ needs.detect-changes.outputs.changed_stacks }}');
-              console.log(`Parsed changed stacks: ${JSON.stringify(changedStacks)}`);
+              stacksArray = JSON.parse(stacksArrayStr);
+              console.log(`Parsed stacks array: ${JSON.stringify(stacksArray)}`);
             } catch (error) {
-              console.error(`Error parsing changed stacks: ${error}`);
-              core.setFailed(`Failed to parse changed stacks: ${error.message}`);
+              console.error(`Error parsing stacks array: ${error}`);
+              return;
+            }
+
+            if (!Array.isArray(stacksArray) || stacksArray.length === 0) {
+              console.log('No valid stacks to process. Ending job.');
               return;
             }
 
@@ -202,9 +264,15 @@ jobs:
             const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
             const basePath = '${{ needs.load-config.outputs.base_path }}';
 
-            // Process each changed stack
-            for (const stack of changedStacks) {
+            // Process each valid stack
+            for (const stack of stacksArray) {
               console.log(`Processing stack: ${stack}`);
+
+              // Validate stack name - only allow alphanumeric chars, hyphens, and underscores
+              if (!/^[a-zA-Z0-9\-_]+$/.test(stack)) {
+                console.log(`Skipping invalid stack name: ${stack}`);
+                continue;
+              }
 
               // Create tag
               const tagName = `${date}-${stack}`;
