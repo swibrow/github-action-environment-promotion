@@ -78,16 +78,16 @@ jobs:
               echo "$STACK:"
               echo "  - '$STACK_PATH'"
             done
-          } > .github/filter.yml
+          } > .github/filter.yaml
 
           echo "Created filter configuration:"
-          cat .github/filter.yml
+          cat .github/filter.yaml
 
       - name: Filter for Terraform stack changes
         uses: dorny/paths-filter@v3
         id: filter
         with:
-          filters: .github/filter.json
+          filters: .github/filter.yaml
 
       - id: detect
         name: Detect changed stacks
