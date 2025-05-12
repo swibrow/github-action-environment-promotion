@@ -1,0 +1,23 @@
+{
+  "stacks": {
+    "account": {
+      "path": "stacks/account/**"
+    },
+    "network": {
+      "path": "stacks/network/**"
+    },
+    "platform": {
+      "path": "stacks/platform/**"
+    },
+    "shared": {
+      "path": "stacks/shared/**"
+    }
+  },
+  "environments": [
+    "sandbox",
+    "dev",
+    "prod"
+  ],
+  "defaultApprovals": 1,
+  "basePath": "stacks"
+}

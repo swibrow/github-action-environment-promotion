@@ -1,0 +1,51 @@
+name: Generate PR Template
+
+on:
+  push:
+    paths:
+      - '.github/config.json'
+    branches:
+      - main
+
+jobs:
+  generate-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate PR template
+        run: |
+          # Load environments from config
+          ENVIRONMENTS=$(jq -r '.environments[]' .github/config.json)
+
+          # Create PR template
+          cat > .github/pull_request_template.md << EOF
+          ## Description
+          <!-- Describe your changes -->
+
+          ## Deployment Configuration
+          <!-- DO NOT EDIT THE FORMATTING OF THE FOLLOWING SECTION -->
+          <!-- Select environments by replacing [ ] with [x] -->
+
+          ### Target Environments
+          EOF
+
+          # Add environment checkboxes
+          for ENV in $ENVIRONMENTS; do
+            echo "- [ ] $ENV" >> .github/pull_request_template.md
+          done
+
+          # Add deployment options
+          cat >> .github/pull_request_template.md << EOF
+
+          ### Deployment Options
+          - Auto-promote: yes/no
+          - Required approvals: $(jq -r '.defaultApprovals // 1' .github/config.json)
+          EOF
+
+          # Commit the updated template
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .github/pull_request_template.md
+          git commit -m "Update PR template based on configuration" || echo "No changes to commit"
+          git push || echo "No changes to push"
