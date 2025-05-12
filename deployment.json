@@ -1,0 +1,12 @@
+{
+  "tag": "20250512-]",
+  "stack": "]",
+  "environment": "sandbox",
+  "issue": 9,
+  "auto_promote": true,
+  "required_approvals": 1,
+  "selected_environments": [
+    "sandbox"
+  ],
+  "base_path": "stacks"
+}
