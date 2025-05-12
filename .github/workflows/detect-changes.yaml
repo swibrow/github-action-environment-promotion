@@ -176,16 +176,27 @@ jobs:
         id: create_tags
         uses: actions/github-script@v6
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const date = '${{ steps.date.outputs.date }}';
-            // Ensure we're parsing the JSON properly
-            const changedStacks = JSON.parse('${{ needs.detect-changes.outputs.changed_stacks }}');
+            // Parse the JSON string to get an array of stacks
+            const changedStacksJson = '${{ needs.detect-changes.outputs.changed_stacks }}';
+            console.log(`Changed stacks JSON: ${changedStacksJson}`);
+
+            // Parse the JSON carefully
+            let changedStacks;
+            try {
+              changedStacks = JSON.parse(changedStacksJson);
+              console.log(`Parsed changed stacks: ${JSON.stringify(changedStacks)}`);
+            } catch (error) {
+              console.error(`Error parsing changed stacks: ${error}`);
+              return;
+            }
+
             const selectedEnvs = ${{ needs.parse-pr-environments.outputs.selected_environments }};
             const autoPromote = ${{ needs.parse-pr-environments.outputs.auto_promote }};
             const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
             const basePath = '${{ needs.load-config.outputs.base_path }}';
-
-            console.log(`Changed stacks: ${JSON.stringify(changedStacks)}`);
 
             // Process each changed stack
             for (const stack of changedStacks) {
