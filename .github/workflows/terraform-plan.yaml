@@ -1,0 +1,96 @@
+# .github/workflows/terraform-plan.yml
+name: Terraform - Generate Plan for PR
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'deployment.json'
+
+jobs:
+  check-deployment-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      is_deployment: ${{ steps.check.outputs.is_deployment }}
+      module: ${{ steps.check.outputs.module }}
+      environment: ${{ steps.check.outputs.environment }}
+      tag: ${{ steps.check.outputs.tag }}
+      issue: ${{ steps.check.outputs.issue }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - id: check
+        name: Check if this is a deployment PR
+        run: |
+          if [ -f "deployment.json" ]; then
+            echo "is_deployment=true" >> $GITHUB_OUTPUT
+            MODULE=$(jq -r '.module' deployment.json)
+            ENV=$(jq -r '.environment' deployment.json)
+            TAG=$(jq -r '.tag' deployment.json)
+            ISSUE=$(jq -r '.issue' deployment.json)
+
+            echo "module=$MODULE" >> $GITHUB_OUTPUT
+            echo "environment=$ENV" >> $GITHUB_OUTPUT
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "issue=$ISSUE" >> $GITHUB_OUTPUT
+          else
+            echo "is_deployment=false" >> $GITHUB_OUTPUT
+          fi
+
+  terraform-plan:
+    needs: check-deployment-pr
+    if: needs.check-deployment-pr.outputs.is_deployment == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform Init
+        run: |
+          cd modules/${{ needs.check-deployment-pr.outputs.module }}
+          terraform init -backend-config=environments/${{ needs.check-deployment-pr.outputs.environment }}/backend.tfvars
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          cd modules/${{ needs.check-deployment-pr.outputs.module }}
+          terraform plan -var-file=environments/${{ needs.check-deployment-pr.outputs.environment }}/terraform.tfvars -out=tfplan
+          terraform show -no-color tfplan > plan_output.txt
+          echo "PLAN_OUTPUT<<EOF" >> $GITHUB_ENV
+          cat plan_output.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Comment on PR
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const planOutput = process.env.PLAN_OUTPUT;
+            const summaryMatch = planOutput.match(/Plan:.*\n/);
+            const summary = summaryMatch ? summaryMatch[0] : 'No changes detected';
+
+            const comment = `## Terraform Plan for ${{ needs.check-deployment-pr.outputs.module }} to ${{ needs.check-deployment-pr.outputs.environment }}
+
+            \`\`\`
+            ${summary}
+            \`\`\`
+
+            <details>
+            <summary>Show Full Plan</summary>
+
+            \`\`\`terraform
+            ${planOutput}
+            \`\`\`
+            </details>
+
+            This PR will deploy module \`${{ needs.check-deployment-pr.outputs.module }}\` to the ${{ needs.check-deployment-pr.outputs.environment }} environment.
+            Deployment is being tracked in issue #${{ needs.check-deployment-pr.outputs.issue }}.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });

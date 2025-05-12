@@ -1,0 +1,260 @@
+name: Terraform - Detect Changes and Create Tags
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - 'stacks/**'
+
+jobs:
+  check-merged:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    outputs:
+      merged: ${{ steps.check.outputs.merged }}
+    steps:
+      - id: check
+        run: echo "merged=true" >> $GITHUB_OUTPUT
+
+  detect-changes:
+    needs: check-merged
+    runs-on: ubuntu-latest
+    outputs:
+      changed_modules: ${{ steps.filter.outputs.changes }}
+      has_changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Filter for Terraform module changes
+        uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          filters: |
+            account:
+              - 'stacks/account/**'
+            network:
+              - 'modules/network/**'
+            platform:
+              - 'modules/platform/**'
+            shared:
+              - 'modules/shared/**'
+
+
+      - name: Check if modules changed
+        id: check
+        run: |
+          CHANGES='${{ steps.filter.outputs.changes }}'
+          if [ "$CHANGES" != "[]" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+  parse-pr-environments:
+    needs: [check-merged, detect-changes]
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      selected_environments: ${{ steps.parse.outputs.selected_environments }}
+      auto_promote: ${{ steps.parse.outputs.auto_promote }}
+      required_approvals: ${{ steps.parse.outputs.required_approvals }}
+    steps:
+      - id: parse
+        name: Parse PR body for environment selection
+        run: |
+          PR_BODY="${{ github.event.pull_request.body }}"
+
+          # Parse selected environments using regex
+          DEV_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] dev" | wc -l)
+          TEST_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] test" | wc -l)
+          STAGING_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] staging" | wc -l)
+          PROD_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] prod" | wc -l)
+
+          SELECTED_ENVS="["
+          if [ $DEV_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"dev\","; fi
+          if [ $TEST_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"test\","; fi
+          if [ $STAGING_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"staging\","; fi
+          if [ $PROD_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"prod\","; fi
+          SELECTED_ENVS="${SELECTED_ENVS%,}]"
+
+          # Extract auto-promote setting
+          AUTO_PROMOTE=$(echo "$PR_BODY" | grep -o "Auto-promote: yes" | wc -l)
+          if [ $AUTO_PROMOTE -gt 0 ]; then
+            AUTO_PROMOTE="true"
+          else
+            AUTO_PROMOTE="false"
+          fi
+
+          # Extract required approvals
+          APPROVALS=$(echo "$PR_BODY" | grep -o "Required approvals: [0-9]+" | grep -o "[0-9]\+")
+          if [ -z "$APPROVALS" ]; then
+            APPROVALS="1"
+          fi
+
+          echo "selected_environments=$SELECTED_ENVS" >> $GITHUB_OUTPUT
+          echo "auto_promote=$AUTO_PROMOTE" >> $GITHUB_OUTPUT
+          echo "required_approvals=$APPROVALS" >> $GITHUB_OUTPUT
+
+  create-tags-and-issues:
+    needs: [detect-changes, parse-pr-environments]
+    if: ${{ needs.detect-changes.outputs.has_changes == 'true' && fromJSON(needs.parse-pr-environments.outputs.selected_environments)[0] != null }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get current date
+        id: date
+        run: |
+          echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Create tags and tracking issues
+        id: create_tags
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const date = '${{ steps.date.outputs.date }}';
+            const changedModules = ${{ needs.detect-changes.outputs.changed_modules }};
+            const selectedEnvs = ${{ needs.parse-pr-environments.outputs.selected_environments }};
+            const autoPromote = ${{ needs.parse-pr-environments.outputs.auto_promote }};
+            const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
+
+            // Process each changed module
+            for (const module of changedModules) {
+              console.log(`Processing module: ${module}`);
+
+              // Create tag
+              const tagName = `${date}-${module}`;
+
+              try {
+                // Create and push the tag
+                await exec.exec('git', ['config', 'user.name', 'GitHub Actions']);
+                await exec.exec('git', ['config', 'user.email', 'actions@github.com']);
+                await exec.exec('git', ['tag', tagName]);
+                await exec.exec('git', ['push', 'origin', tagName]);
+
+                console.log(`Created tag: ${tagName}`);
+
+                // Create tracking issue
+                const statusTable = selectedEnvs.map(env =>
+                  `| ${env.toUpperCase()} | Pending | - | - | - |`
+                ).join('\n');
+
+                const { data: issue } = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `Deployment Tracking: ${tagName}`,
+                  body: `## Deployment Tracking for ${module}
+
+                  **Tag:** \`${tagName}\`
+                  **Module:** ${module}
+                  **Created By:** ${context.actor}
+                  **Original PR:** #${{ github.event.pull_request.number }}
+
+                  ## Deployment Configuration
+                  - Auto-promote: ${autoPromote ? 'Yes' : 'No'}
+                  - Required approvals: ${requiredApprovals}
+                  - Selected environments: ${selectedEnvs.join(', ')}
+
+                  ## Deployment Status
+
+                  | Environment | Status | Deployed At | PR | Approver |
+                  |-------------|--------|-------------|-------|----------|
+                  ${statusTable}
+
+                  ## Activity Log
+
+                  - ${new Date().toISOString()}: Deployment issue created for module ${module}
+                  `,
+                  labels: ['deployment', 'terraform', module]
+                });
+
+                console.log(`Created tracking issue #${issue.number}`);
+
+                // Create PR for first environment in the selection
+                const firstEnv = selectedEnvs[0];
+                await createEnvironmentPR(module, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs);
+              } catch (error) {
+                console.error(`Error processing module ${module}: ${error}`);
+              }
+            }
+
+            // Helper function to create environment PR
+            async function createEnvironmentPR(module, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs) {
+              const branchName = `deploy/${tag}/${env}`;
+
+              // Create branch
+              await exec.exec('git', ['checkout', '-b', branchName]);
+
+              // Create deployment manifest file
+              const fs = require('fs');
+              const deploymentConfig = {
+                tag: tag,
+                module: module,
+                environment: env,
+                issue: issueNumber,
+                auto_promote: autoPromote,
+                required_approvals: requiredApprovals,
+                selected_environments: selectedEnvs
+              };
+
+              fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
+
+              // Commit and push
+              await exec.exec('git', ['add', 'deployment.json']);
+              await exec.exec('git', ['commit', '-m', `Deployment plan for ${module} to ${env}`]);
+              await exec.exec('git', ['push', '--set-upstream', 'origin', branchName]);
+
+              // Create progress indicator for PR description
+              const progressList = selectedEnvs.map(selectedEnv => {
+                if (selectedEnv === env) {
+                  return `- [x] ${selectedEnv.toUpperCase()} (this PR)`;
+                } else {
+                  return `- [ ] ${selectedEnv.toUpperCase()} (pending)`;
+                }
+              }).join('\n');
+
+              // Create PR
+              const { data: pr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚀 Deploy ${module} to ${env.toUpperCase()}`,
+                body: `This PR will deploy the \`${module}\` module to the ${env.toUpperCase()} environment.
+
+                **Deployment Tag:** \`${tag}\`
+                **Tracking Issue:** #${issueNumber}
+                **Original PR:** #${{ github.event.pull_request.number }}
+                **Auto-promote:** ${autoPromote ? 'Yes' : 'No'}
+                **Required Approvals:** ${requiredApprovals}
+
+                ## Deployment Progress
+                ${progressList}
+
+                ## Deployment Process
+                1. Review the Terraform plan added as a comment to this PR
+                2. Approve and merge this PR to deploy to ${env.toUpperCase()}
+                ${autoPromote ? '3. The next environment PR will be created automatically upon successful deployment' : '3. After deployment, manually create the next environment PR if desired'}
+
+                This is part of a deployment tracked in issue #${issueNumber}.
+                `,
+                head: branchName,
+                base: 'main'
+              });
+
+              console.log(`Created PR #${pr.number} for ${module} to ${env}`);
+
+              // Update tracking issue with PR link
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `## ${env.toUpperCase()} Deployment PR Created
+
+                PR #${pr.number} has been created to deploy module \`${module}\` to the ${env.toUpperCase()} environment.
+                `
+              });
+            }
