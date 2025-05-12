@@ -1,3 +1,4 @@
+# .github/workflows/terraform-detect-changes.yml
 name: Terraform - Detect Changes and Create Tags
 
 on:
@@ -23,12 +24,12 @@ jobs:
     needs: check-merged
     runs-on: ubuntu-latest
     outputs:
-      changed_modules: ${{ steps.filter.outputs.changes }}
+      changed_stacks: ${{ steps.filter.outputs.changes }}
       has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
       - uses: actions/checkout@v3
 
-      - name: Filter for Terraform module changes
+      - name: Filter for Terraform stack changes
         uses: dorny/paths-filter@v2
         id: filter
         with:
@@ -36,14 +37,13 @@ jobs:
             account:
               - 'stacks/account/**'
             network:
-              - 'modules/network/**'
+              - 'stacks/network/**'
             platform:
-              - 'modules/platform/**'
+              - 'stacks/platform/**'
             shared:
-              - 'modules/shared/**'
+              - 'stacks/shared/**'
 
-
-      - name: Check if modules changed
+      - name: Check if stacks changed
         id: check
         run: |
           CHANGES='${{ steps.filter.outputs.changes }}'
@@ -68,15 +68,13 @@ jobs:
           PR_BODY="${{ github.event.pull_request.body }}"
 
           # Parse selected environments using regex
+          SANDBOX_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] sandbox" | wc -l)
           DEV_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] dev" | wc -l)
-          TEST_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] test" | wc -l)
-          STAGING_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] staging" | wc -l)
           PROD_SELECTED=$(echo "$PR_BODY" | grep -o "- \[x\] prod" | wc -l)
 
           SELECTED_ENVS="["
+          if [ $SANDBOX_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"sandbox\","; fi
           if [ $DEV_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"dev\","; fi
-          if [ $TEST_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"test\","; fi
-          if [ $STAGING_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"staging\","; fi
           if [ $PROD_SELECTED -gt 0 ]; then SELECTED_ENVS="$SELECTED_ENVS\"prod\","; fi
           SELECTED_ENVS="${SELECTED_ENVS%,}]"
 
@@ -118,17 +116,17 @@ jobs:
         with:
           script: |
             const date = '${{ steps.date.outputs.date }}';
-            const changedModules = ${{ needs.detect-changes.outputs.changed_modules }};
+            const changedStacks = ${{ needs.detect-changes.outputs.changed_stacks }};
             const selectedEnvs = ${{ needs.parse-pr-environments.outputs.selected_environments }};
             const autoPromote = ${{ needs.parse-pr-environments.outputs.auto_promote }};
             const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
 
-            // Process each changed module
-            for (const module of changedModules) {
-              console.log(`Processing module: ${module}`);
+            // Process each changed stack
+            for (const stack of changedStacks) {
+              console.log(`Processing stack: ${stack}`);
 
               // Create tag
-              const tagName = `${date}-${module}`;
+              const tagName = `${date}-${stack}`;
 
               try {
                 // Create and push the tag
@@ -148,10 +146,10 @@ jobs:
                   owner: context.repo.owner,
                   repo: context.repo.repo,
                   title: `Deployment Tracking: ${tagName}`,
-                  body: `## Deployment Tracking for ${module}
+                  body: `## Deployment Tracking for ${stack}
 
                   **Tag:** \`${tagName}\`
-                  **Module:** ${module}
+                  **Stack:** ${stack}
                   **Created By:** ${context.actor}
                   **Original PR:** #${{ github.event.pull_request.number }}
 
@@ -168,23 +166,23 @@ jobs:
 
                   ## Activity Log
 
-                  - ${new Date().toISOString()}: Deployment issue created for module ${module}
+                  - ${new Date().toISOString()}: Deployment issue created for stack ${stack}
                   `,
-                  labels: ['deployment', 'terraform', module]
+                  labels: ['deployment', 'terraform', stack]
                 });
 
                 console.log(`Created tracking issue #${issue.number}`);
 
                 // Create PR for first environment in the selection
                 const firstEnv = selectedEnvs[0];
-                await createEnvironmentPR(module, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs);
+                await createEnvironmentPR(stack, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs);
               } catch (error) {
-                console.error(`Error processing module ${module}: ${error}`);
+                console.error(`Error processing stack ${stack}: ${error}`);
               }
             }
 
             // Helper function to create environment PR
-            async function createEnvironmentPR(module, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs) {
+            async function createEnvironmentPR(stack, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs) {
               const branchName = `deploy/${tag}/${env}`;
 
               // Create branch
@@ -194,7 +192,7 @@ jobs:
               const fs = require('fs');
               const deploymentConfig = {
                 tag: tag,
-                module: module,
+                stack: stack,
                 environment: env,
                 issue: issueNumber,
                 auto_promote: autoPromote,
@@ -206,7 +204,7 @@ jobs:
 
               // Commit and push
               await exec.exec('git', ['add', 'deployment.json']);
-              await exec.exec('git', ['commit', '-m', `Deployment plan for ${module} to ${env}`]);
+              await exec.exec('git', ['commit', '-m', `Deployment plan for ${stack} to ${env}`]);
               await exec.exec('git', ['push', '--set-upstream', 'origin', branchName]);
 
               // Create progress indicator for PR description
@@ -222,8 +220,8 @@ jobs:
               const { data: pr } = await github.rest.pulls.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                title: `🚀 Deploy ${module} to ${env.toUpperCase()}`,
-                body: `This PR will deploy the \`${module}\` module to the ${env.toUpperCase()} environment.
+                title: `🚀 Deploy ${stack} to ${env.toUpperCase()}`,
+                body: `This PR will deploy the \`${stack}\` stack to the ${env.toUpperCase()} environment.
 
                 **Deployment Tag:** \`${tag}\`
                 **Tracking Issue:** #${issueNumber}
@@ -245,7 +243,7 @@ jobs:
                 base: 'main'
               });
 
-              console.log(`Created PR #${pr.number} for ${module} to ${env}`);
+              console.log(`Created PR #${pr.number} for ${stack} to ${env}`);
 
               // Update tracking issue with PR link
               await github.rest.issues.createComment({
@@ -254,7 +252,7 @@ jobs:
                 issue_number: issueNumber,
                 body: `## ${env.toUpperCase()} Deployment PR Created
 
-                PR #${pr.number} has been created to deploy module \`${module}\` to the ${env.toUpperCase()} environment.
+                PR #${pr.number} has been created to deploy stack \`${stack}\` to the ${env.toUpperCase()} environment.
                 `
               });
             }
