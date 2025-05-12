@@ -1,0 +1,229 @@
+name: Terraform - Manual Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: 'Stack to deploy (e.g., network, account)'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (e.g., sandbox, dev, prod)'
+        required: true
+        type: string
+      auto_promote:
+        description: 'Automatically promote to next environment'
+        required: true
+        type: boolean
+        default: false
+      required_approvals:
+        description: 'Required approvals for each environment'
+        required: true
+        type: number
+        default: 1
+
+jobs:
+  validate-inputs:
+    runs-on: ubuntu-latest
+    outputs:
+      valid_stack: ${{ steps.validate.outputs.valid_stack }}
+      valid_env: ${{ steps.validate.outputs.valid_env }}
+      selected_environments: ${{ steps.validate.outputs.selected_environments }}
+    steps:
+      - uses: actions/checkout@v3
+
+      - id: validate
+        name: Validate inputs against config
+        run: |
+          # Load config
+          STACKS=$(jq -r '.stacks | keys | join(",")' .github/config.json)
+          ENVIRONMENTS=$(jq -r '.environments | join(",")' .github/config.json)
+
+          # Check if stack is valid
+          if [[ $STACKS == *"${{ inputs.stack }}"* ]]; then
+            echo "valid_stack=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid_stack=false" >> $GITHUB_OUTPUT
+            echo "Error: '${{ inputs.stack }}' is not a valid stack. Valid stacks are: $STACKS"
+            exit 1
+          fi
+
+          # Check if environment is valid
+          if [[ $ENVIRONMENTS == *"${{ inputs.environment }}"* ]]; then
+            echo "valid_env=true" >> $GITHUB_OUTPUT
+          else
+            echo "valid_env=false" >> $GITHUB_OUTPUT
+            echo "Error: '${{ inputs.environment }}' is not a valid environment. Valid environments are: $ENVIRONMENTS"
+            exit 1
+          fi
+
+          # Create selected environments array
+          # Get all environments after the selected one in config order
+          IFS=',' read -ra ENV_ARRAY <<< "$ENVIRONMENTS"
+          SELECTED=false
+          SELECTED_ENVS="["
+
+          for ENV in "${ENV_ARRAY[@]}"; do
+            if [ "$ENV" == "${{ inputs.environment }}" ]; then
+              SELECTED=true
+            fi
+
+            if [ "$SELECTED" = true ]; then
+              SELECTED_ENVS="$SELECTED_ENVS\"$ENV\","
+            fi
+          done
+
+          SELECTED_ENVS="${SELECTED_ENVS%,}]"
+          echo "selected_environments=$SELECTED_ENVS" >> $GITHUB_OUTPUT
+
+  create-tag-and-issue:
+    needs: validate-inputs
+    if: needs.validate-inputs.valid_stack == 'true' && needs.validate-inputs.valid_env == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Get current date
+        id: date
+        run: |
+          echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Create deployment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const date = '${{ steps.date.outputs.date }}';
+            const stack = '${{ inputs.stack }}';
+            const env = '${{ inputs.environment }}';
+            const autoPromote = ${{ inputs.auto_promote }};
+            const requiredApprovals = ${{ inputs.required_approvals }};
+            const selectedEnvs = ${{ needs.validate-inputs.outputs.selected_environments }};
+
+            try {
+              // Load config
+              const fs = require('fs');
+              const config = JSON.parse(fs.readFileSync('.github/config.json', 'utf8'));
+              const basePath = config.basePath || 'stacks';
+
+              // Create tag
+              const tagName = `${date}-${stack}`;
+              await exec.exec('git', ['config', 'user.name', 'GitHub Actions']);
+              await exec.exec('git', ['config', 'user.email', 'actions@github.com']);
+              await exec.exec('git', ['tag', tagName]);
+              await exec.exec('git', ['push', 'origin', tagName]);
+
+              console.log(`Created tag: ${tagName}`);
+
+              // Create tracking issue
+              const statusTable = selectedEnvs.map(env =>
+                `| ${env.toUpperCase()} | Pending | - | - | - |`
+              ).join('\n');
+
+              const { data: issue } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Deployment Tracking: ${tagName}`,
+                body: `## Deployment Tracking for ${stack}
+
+                **Tag:** \`${tagName}\`
+                **Stack:** ${stack}
+                **Created By:** ${context.actor}
+                **Created Via:** Manual workflow dispatch
+
+                ## Deployment Configuration
+                - Auto-promote: ${autoPromote ? 'Yes' : 'No'}
+                - Required approvals: ${requiredApprovals}
+                - Selected environments: ${selectedEnvs.join(', ')}
+
+                ## Deployment Status
+
+                | Environment | Status | Deployed At | PR | Approver |
+                |-------------|--------|-------------|-------|----------|
+                ${statusTable}
+
+                ## Activity Log
+
+                - ${new Date().toISOString()}: Deployment issue created for stack ${stack} via manual workflow
+                `,
+                labels: ['deployment', 'terraform', stack]
+              });
+
+              console.log(`Created tracking issue #${issue.number}`);
+
+              // Create branch for deployment PR
+              const branchName = `deploy/${tagName}/${env}`;
+              await exec.exec('git', ['checkout', '-b', branchName]);
+
+              // Create deployment manifest
+              const deploymentConfig = {
+                tag: tagName,
+                stack: stack,
+                environment: env,
+                issue: issue.number,
+                auto_promote: autoPromote,
+                required_approvals: requiredApprovals,
+                selected_environments: selectedEnvs,
+                base_path: basePath
+              };
+
+              fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
+
+              // Commit and push
+              await exec.exec('git', ['add', 'deployment.json']);
+              await exec.exec('git', ['commit', '-m', `Deployment plan for ${stack} to ${env}`]);
+              await exec.exec('git', ['push', '--set-upstream', 'origin', branchName]);
+
+              // Create PR
+              const progressList = selectedEnvs.map(selectedEnv => {
+                if (selectedEnv === env) {
+                  return `- [x] ${selectedEnv.toUpperCase()} (this PR)`;
+                } else {
+                  return `- [ ] ${selectedEnv.toUpperCase()} (pending)`;
+                }
+              }).join('\n');
+
+              const { data: pr } = await github.rest.pulls.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚀 Deploy ${stack} to ${env.toUpperCase()}`,
+                body: `This PR will deploy the \`${stack}\` stack to the ${env.toUpperCase()} environment.
+
+                **Deployment Tag:** \`${tagName}\`
+                **Tracking Issue:** #${issue.number}
+                **Auto-promote:** ${autoPromote ? 'Yes' : 'No'}
+                **Required Approvals:** ${requiredApprovals}
+
+                ## Deployment Progress
+                ${progressList}
+
+                ## Deployment Process
+                1. Review the Terraform plan added as a comment to this PR
+                2. Approve and merge this PR to deploy to ${env.toUpperCase()}
+                ${autoPromote ? '3. The next environment PR will be created automatically upon successful deployment' : '3. After deployment, manually create the next environment PR if desired'}
+
+                This is part of a deployment tracked in issue #${issue.number}.
+                `,
+                head: branchName,
+                base: 'main'
+              });
+
+              console.log(`Created PR #${pr.number} for ${stack} to ${env}`);
+
+              // Comment on the issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issue.number,
+                body: `## ${env.toUpperCase()} Deployment PR Created
+
+                PR #${pr.number} has been created to deploy stack \`${stack}\` to the ${env.toUpperCase()} environment.
+                `
+              });
+
+              console.log(`Deployment setup complete. Check PR #${pr.number} and issue #${issue.number}`);
+            } catch (error) {
+              console.error(`Error in deployment setup: ${error}`);
+              throw error;
+            }

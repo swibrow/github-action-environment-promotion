@@ -106,37 +106,47 @@ jobs:
       - id: parse
         name: Parse PR body for environment selection
         run: |
-          PR_BODY="${{ github.event.pull_request.body }}"
-          ENVIRONMENTS=($(echo '${{ needs.load-config.outputs.environments }}' | tr ',' ' '))
+          python3 -c '
+          import re
+          import json
+          import os
+          import sys
 
-          # Initialize empty array
-          SELECTED_ENVS="["
+          # Get PR body from GitHub context
+          pr_body = """${{ github.event.pull_request.body }}"""
 
-          # Check each environment
-          for ENV in "${ENVIRONMENTS[@]}"; do
-            # Use shell pattern matching instead of grep
-            if [[ "$PR_BODY" == *"- [x] $ENV"* ]]; then
-              SELECTED_ENVS="$SELECTED_ENVS\"$ENV\","
-            fi
-          done
+          # Get environments from config
+          environments = "${{ needs.load-config.outputs.environments }}".split(",")
 
-          # Remove trailing comma and close array
-          SELECTED_ENVS="${SELECTED_ENVS%,}]"
+          # Parse selected environments
+          selected_envs = []
+          for env in environments:
+              # Look for checked checkbox pattern: - [x] env_name
+              if re.search(r"- \[[xX]\]\s*" + re.escape(env), pr_body):
+                  selected_envs.append(env)
 
-          # Simplified auto-promote detection
-          if [[ "$PR_BODY" == *"Auto-promote: yes"* ]]; then
-            AUTO_PROMOTE="true"
-          else
-            AUTO_PROMOTE="false"
-          fi
+          # Parse auto-promote setting (default to false)
+          auto_promote = "false"
+          if re.search(r"Auto-promote:\s*yes", pr_body, re.IGNORECASE):
+              auto_promote = "true"
 
-          # Extract required approvals with pattern matching
-          APPROVALS=$(echo "$PR_BODY" | grep -E "Required approvals: *[0-9]+" | grep -E -o "[0-9]+" || echo "1")
+          # Parse required approvals (default to 1)
+          required_approvals = "1"
+          approvals_match = re.search(r"Required approvals:\s*(\d+)", pr_body)
+          if approvals_match:
+              required_approvals = approvals_match.group(1)
 
-          echo "selected_environments=$SELECTED_ENVS" >> $GITHUB_OUTPUT
-          echo "auto_promote=$AUTO_PROMOTE" >> $GITHUB_OUTPUT
-          echo "required_approvals=$APPROVALS" >> $GITHUB_OUTPUT
+          # Print results for debugging
+          print(f"Selected environments: {selected_envs}")
+          print(f"Auto promote: {auto_promote}")
+          print(f"Required approvals: {required_approvals}")
 
+          # Write outputs to GITHUB_OUTPUT
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"selected_environments={json.dumps(selected_envs)}\n")
+              f.write(f"auto_promote={auto_promote}\n")
+              f.write(f"required_approvals={required_approvals}\n")
+        '
   create-tags-and-issues:
     needs: [detect-changes, parse-pr-environments, load-config]
     if: ${{ needs.detect-changes.outputs.has_changes == 'true' && fromJSON(needs.parse-pr-environments.outputs.selected_environments)[0] != null }}
