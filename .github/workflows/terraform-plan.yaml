@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       is_deployment: ${{ steps.check.outputs.is_deployment }}
-      module: ${{ steps.check.outputs.module }}
+      stack: ${{ steps.check.outputs.stack }}
       environment: ${{ steps.check.outputs.environment }}
       tag: ${{ steps.check.outputs.tag }}
       issue: ${{ steps.check.outputs.issue }}
@@ -24,12 +24,12 @@ jobs:
         run: |
           if [ -f "deployment.json" ]; then
             echo "is_deployment=true" >> $GITHUB_OUTPUT
-            MODULE=$(jq -r '.module' deployment.json)
+            STACK=$(jq -r '.stack' deployment.json)
             ENV=$(jq -r '.environment' deployment.json)
             TAG=$(jq -r '.tag' deployment.json)
             ISSUE=$(jq -r '.issue' deployment.json)
 
-            echo "module=$MODULE" >> $GITHUB_OUTPUT
+            echo "stack=$STACK" >> $GITHUB_OUTPUT
             echo "environment=$ENV" >> $GITHUB_OUTPUT
             echo "tag=$TAG" >> $GITHUB_OUTPUT
             echo "issue=$ISSUE" >> $GITHUB_OUTPUT
@@ -49,13 +49,13 @@ jobs:
 
       - name: Terraform Init
         run: |
-          cd modules/${{ needs.check-deployment-pr.outputs.module }}
+          cd stacks/${{ needs.check-deployment-pr.outputs.stack }}
           terraform init -backend-config=environments/${{ needs.check-deployment-pr.outputs.environment }}/backend.tfvars
 
       - name: Terraform Plan
         id: plan
         run: |
-          cd modules/${{ needs.check-deployment-pr.outputs.module }}
+          cd stacks/${{ needs.check-deployment-pr.outputs.stack }}
           terraform plan -var-file=environments/${{ needs.check-deployment-pr.outputs.environment }}/terraform.tfvars -out=tfplan
           terraform show -no-color tfplan > plan_output.txt
           echo "PLAN_OUTPUT<<EOF" >> $GITHUB_ENV
@@ -71,7 +71,7 @@ jobs:
             const summaryMatch = planOutput.match(/Plan:.*\n/);
             const summary = summaryMatch ? summaryMatch[0] : 'No changes detected';
 
-            const comment = `## Terraform Plan for ${{ needs.check-deployment-pr.outputs.module }} to ${{ needs.check-deployment-pr.outputs.environment }}
+            const comment = `## Terraform Plan for ${{ needs.check-deployment-pr.outputs.stack }} to ${{ needs.check-deployment-pr.outputs.environment }}
 
             \`\`\`
             ${summary}
@@ -85,7 +85,7 @@ jobs:
             \`\`\`
             </details>
 
-            This PR will deploy module \`${{ needs.check-deployment-pr.outputs.module }}\` to the ${{ needs.check-deployment-pr.outputs.environment }} environment.
+            This PR will deploy stack \`${{ needs.check-deployment-pr.outputs.stack }}\` to the ${{ needs.check-deployment-pr.outputs.environment }} environment.
             Deployment is being tracked in issue #${{ needs.check-deployment-pr.outputs.issue }}.`;
 
             github.rest.issues.createComment({
