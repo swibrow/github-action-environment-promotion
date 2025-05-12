@@ -166,26 +166,41 @@ jobs:
       - uses: actions/checkout@v3
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}  # Use token with write permissions
 
       - name: Get current date
         id: date
         run: |
           echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
 
+      - name: Debug changed stacks
+        run: |
+          echo "Changed stacks: ${{ needs.detect-changes.outputs.changed_stacks }}"
+          echo "Type: $(echo '${{ needs.detect-changes.outputs.changed_stacks }}' | jq -r 'type')"
+
       - name: Create tags and tracking issues
         id: create_tags
         uses: actions/github-script@v6
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}  # Use token with write permissions
           script: |
             const date = '${{ steps.date.outputs.date }}';
-            // Ensure we're parsing the JSON properly
-            const changedStacks = JSON.parse('${{ needs.detect-changes.outputs.changed_stacks }}');
+
+            // Parse the JSON string to get an array of stacks
+            let changedStacks;
+            try {
+              changedStacks = JSON.parse('${{ needs.detect-changes.outputs.changed_stacks }}');
+              console.log(`Parsed changed stacks: ${JSON.stringify(changedStacks)}`);
+            } catch (error) {
+              console.error(`Error parsing changed stacks: ${error}`);
+              core.setFailed(`Failed to parse changed stacks: ${error.message}`);
+              return;
+            }
+
             const selectedEnvs = ${{ needs.parse-pr-environments.outputs.selected_environments }};
             const autoPromote = ${{ needs.parse-pr-environments.outputs.auto_promote }};
             const requiredApprovals = ${{ needs.parse-pr-environments.outputs.required_approvals }};
             const basePath = '${{ needs.load-config.outputs.base_path }}';
-
-            console.log(`Changed stacks: ${JSON.stringify(changedStacks)}`);
 
             // Process each changed stack
             for (const stack of changedStacks) {
@@ -240,10 +255,15 @@ jobs:
                 console.log(`Created tracking issue #${issue.number}`);
 
                 // Create PR for first environment in the selection
-                const firstEnv = selectedEnvs[0];
-                await createEnvironmentPR(stack, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs, basePath);
+                if (selectedEnvs.length > 0) {
+                  const firstEnv = selectedEnvs[0];
+                  await createEnvironmentPR(stack, tagName, firstEnv, issue.number, autoPromote, requiredApprovals, selectedEnvs, basePath);
+                } else {
+                  console.log('No environments selected, skipping PR creation');
+                }
               } catch (error) {
                 console.error(`Error processing stack ${stack}: ${error}`);
+                // Continue with other stacks instead of failing the whole job
               }
             }
 
@@ -251,75 +271,96 @@ jobs:
             async function createEnvironmentPR(stack, tag, env, issueNumber, autoPromote, requiredApprovals, selectedEnvs, basePath) {
               const branchName = `deploy/${tag}/${env}`;
 
-              // Create branch
-              await exec.exec('git', ['checkout', '-b', branchName]);
+              try {
+                // Create branch
+                await exec.exec('git', ['checkout', '-b', branchName]);
 
-              // Create deployment manifest file
-              const fs = require('fs');
-              const deploymentConfig = {
-                tag: tag,
-                stack: stack,
-                environment: env,
-                issue: issueNumber,
-                auto_promote: autoPromote,
-                required_approvals: requiredApprovals,
-                selected_environments: selectedEnvs,
-                base_path: basePath
-              };
+                // Create deployment manifest file
+                const fs = require('fs');
+                const deploymentConfig = {
+                  tag: tag,
+                  stack: stack,
+                  environment: env,
+                  issue: issueNumber,
+                  auto_promote: autoPromote,
+                  required_approvals: requiredApprovals,
+                  selected_environments: selectedEnvs,
+                  base_path: basePath
+                };
 
-              fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
+                fs.writeFileSync('deployment.json', JSON.stringify(deploymentConfig, null, 2));
 
-              // Commit and push
-              await exec.exec('git', ['add', 'deployment.json']);
-              await exec.exec('git', ['commit', '-m', `Deployment plan for ${stack} to ${env}`]);
-              await exec.exec('git', ['push', '--set-upstream', 'origin', branchName]);
+                // Commit and push
+                await exec.exec('git', ['add', 'deployment.json']);
+                await exec.exec('git', ['commit', '-m', `Deployment plan for ${stack} to ${env}`]);
+                await exec.exec('git', ['push', '--set-upstream', 'origin', branchName]);
 
-              // Create progress indicator for PR description
-              const progressList = selectedEnvs.map(selectedEnv => {
-                if (selectedEnv === env) {
-                  return `- [x] ${selectedEnv.toUpperCase()} (this PR)`;
-                } else {
-                  return `- [ ] ${selectedEnv.toUpperCase()} (pending)`;
-                }
-              }).join('\n');
+                // Create progress indicator for PR description
+                const progressList = selectedEnvs.map(selectedEnv => {
+                  if (selectedEnv === env) {
+                    return `- [x] ${selectedEnv.toUpperCase()} (this PR)`;
+                  } else {
+                    return `- [ ] ${selectedEnv.toUpperCase()} (pending)`;
+                  }
+                }).join('\n');
 
-              // Create PR
-              const { data: pr } = await github.rest.pulls.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: `🚀 Deploy ${stack} to ${env.toUpperCase()}`,
-                body: `This PR will deploy the \`${stack}\` stack to the ${env.toUpperCase()} environment.
+                // Create PR
+                const { data: pr } = await github.rest.pulls.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title: `🚀 Deploy ${stack} to ${env.toUpperCase()}`,
+                  body: `This PR will deploy the \`${stack}\` stack to the ${env.toUpperCase()} environment.
 
-                **Deployment Tag:** \`${tag}\`
-                **Tracking Issue:** #${issueNumber}
-                **Original PR:** #${{ github.event.pull_request.number }}
-                **Auto-promote:** ${autoPromote ? 'Yes' : 'No'}
-                **Required Approvals:** ${requiredApprovals}
+                  **Deployment Tag:** \`${tag}\`
+                  **Tracking Issue:** #${issueNumber}
+                  **Original PR:** #${{ github.event.pull_request.number }}
+                  **Auto-promote:** ${autoPromote ? 'Yes' : 'No'}
+                  **Required Approvals:** ${requiredApprovals}
 
-                ## Deployment Progress
-                ${progressList}
+                  ## Deployment Progress
+                  ${progressList}
 
-                ## Deployment Process
-                1. Review the Terraform plan added as a comment to this PR
-                2. Approve and merge this PR to deploy to ${env.toUpperCase()}
-                ${autoPromote ? '3. The next environment PR will be created automatically upon successful deployment' : '3. After deployment, manually create the next environment PR if desired'}
+                  ## Deployment Process
+                  1. Review the Terraform plan added as a comment to this PR
+                  2. Approve and merge this PR to deploy to ${env.toUpperCase()}
+                  ${autoPromote ? '3. The next environment PR will be created automatically upon successful deployment' : '3. After deployment, manually create the next environment PR if desired'}
 
-                This is part of a deployment tracked in issue #${issueNumber}.
-                `,
-                head: branchName,
-                base: 'main'
-              });
+                  This is part of a deployment tracked in issue #${issueNumber}.
+                  `,
+                  head: branchName,
+                  base: 'main'
+                });
 
-              console.log(`Created PR #${pr.number} for ${stack} to ${env}`);
+                console.log(`Created PR #${pr.number} for ${stack} to ${env}`);
 
-              // Update tracking issue with PR link
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: `## ${env.toUpperCase()} Deployment PR Created
+                // Update tracking issue with PR link
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body: `## ${env.toUpperCase()} Deployment PR Created
 
-                PR #${pr.number} has been created to deploy stack \`${stack}\` to the ${env.toUpperCase()} environment.
-                `
-              });
+                  PR #${pr.number} has been created to deploy stack \`${stack}\` to the ${env.toUpperCase()} environment.
+                  `
+                });
+
+                return pr.number;
+              } catch (error) {
+                console.error(`Error creating PR for ${stack} to ${env}: ${error}`);
+                // Add comment to the issue about the failure
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body: `## Error Creating PR for ${env.toUpperCase()}
+
+                  Failed to create PR to deploy \`${stack}\` to ${env.toUpperCase()}.
+
+                  Error: ${error.message}
+
+                  Please check the workflow logs for more details.
+                  `
+                });
+                throw error;
+              }
             }
